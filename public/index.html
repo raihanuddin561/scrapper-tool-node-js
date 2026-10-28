@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Maps Lead Scraper</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100">
+  <main class="mx-auto max-w-6xl px-4 py-8 sm:px-6">
+    <header class="mb-8 flex flex-col gap-3 border-b border-slate-800 pb-6 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p class="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-400">Local lead workspace</p>
+        <h1 class="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Google Maps Lead Scraper</h1>
+      </div>
+      <p class="max-w-md text-sm leading-6 text-slate-400">Scrape public business listings and available contact emails for lawful, authorized outreach.</p>
+    </header>
+
+    <section class="grid gap-6 lg:grid-cols-[350px_1fr]">
+      <form id="scrape-form" class="h-fit rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-black/20">
+        <label for="query" class="mb-2 block text-sm font-medium">Search query</label>
+        <textarea id="query" rows="3" required placeholder="cafe and restaurant abbotsford australia" class="w-full resize-none rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm outline-none focus:border-emerald-500"></textarea>
+
+        <label for="limit" class="mb-2 mt-5 block text-sm font-medium">Max results</label>
+        <input id="limit" type="number" min="1" max="200" value="20" required class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm outline-none focus:border-emerald-500">
+
+        <fieldset class="mt-5">
+          <legend class="mb-2 text-sm font-medium">Export format</legend>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="cursor-pointer rounded-lg border border-slate-700 p-3 text-center text-sm has-[:checked]:border-emerald-500 has-[:checked]:bg-emerald-500/10">
+              <input type="radio" name="format" value="xlsx" checked class="sr-only"> XLSX
+            </label>
+            <label class="cursor-pointer rounded-lg border border-slate-700 p-3 text-center text-sm has-[:checked]:border-emerald-500 has-[:checked]:bg-emerald-500/10">
+              <input type="radio" name="format" value="csv" class="sr-only"> CSV
+            </label>
+          </div>
+        </fieldset>
+
+        <label class="mt-5 flex items-start gap-3 text-xs leading-5 text-slate-400">
+          <input id="authorized" type="checkbox" required class="mt-1 accent-emerald-500">
+          I will use these public records responsibly and comply with applicable privacy and website terms.
+        </label>
+
+        <button id="submit-button" type="submit" class="mt-5 w-full rounded-lg bg-emerald-500 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-wait disabled:opacity-60">Start scraping</button>
+      </form>
+
+      <section class="min-w-0">
+        <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <p class="text-xs font-medium uppercase tracking-widest text-slate-500">Job progress</p>
+              <p id="status" class="mt-1 truncate text-sm text-slate-300">Ready</p>
+            </div>
+            <span id="count" class="shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">0 / 0</span>
+          </div>
+          <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-800">
+            <div id="progress" class="h-full w-0 rounded-full bg-emerald-500 transition-all duration-300"></div>
+          </div>
+          <button id="download-button" type="button" hidden class="mt-4 w-full rounded-lg border border-emerald-500 px-4 py-2.5 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10">Download export</button>
+        </div>
+
+        <div class="mt-5 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
+          <div class="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+            <h2 class="text-sm font-semibold">Live preview</h2>
+            <button id="clear-button" type="button" class="text-xs text-slate-500 hover:text-slate-300">Clear</button>
+          </div>
+          <div class="max-h-[530px] overflow-auto">
+            <table class="w-full min-w-[760px] border-collapse text-left text-xs">
+              <thead class="sticky top-0 bg-slate-900 text-slate-400">
+                <tr><th class="p-3 font-medium">Name</th><th class="p-3 font-medium">Address</th><th class="p-3 font-medium">Phone</th><th class="p-3 font-medium">Website</th><th class="p-3 font-medium">Emails</th></tr>
+              </thead>
+              <tbody id="preview"></tbody>
+            </table>
+            <p id="empty" class="p-8 text-center text-sm text-slate-500">Results will appear here as each site is processed.</p>
+          </div>
+        </div>
+
+        <details class="mt-5 rounded-xl border border-slate-800 bg-slate-900 px-4 py-3">
+          <summary class="cursor-pointer text-sm font-medium text-slate-400">Activity log</summary>
+          <ul id="log" class="mt-3 max-h-52 space-y-2 overflow-auto text-xs text-slate-400"></ul>
+        </details>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector('#scrape-form');
+    const submitButton = document.querySelector('#submit-button');
+    const statusText = document.querySelector('#status');
+    const count = document.querySelector('#count');
+    const progress = document.querySelector('#progress');
+    const preview = document.querySelector('#preview');
+    const empty = document.querySelector('#empty');
+    const log = document.querySelector('#log');
+    const downloadButton = document.querySelector('#download-button');
+    let total = 0;
+    let downloadUrl = '';
+
+    function addLog(message, error = false) {
+      const item = document.createElement('li');
+      item.textContent = `${new Date().toLocaleTimeString()} — ${message}`;
+      if (error) item.className = 'text-red-400';
+      log.prepend(item);
+    }
+
+    function escapeHtml(value) {
+      const node = document.createElement('span');
+      node.textContent = value == null ? '' : String(value);
+      return node.innerHTML;
+    }
+
+    function addRow(row) {
+      empty.hidden = true;
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-slate-800 align-top';
+      const values = [row.Name, row.Address, row.Phone, row.Website, row.Emails];
+      tr.innerHTML = values.map((value, index) => {
+        const text = escapeHtml(value);
+        if (index === 3 && value) return `<td class="max-w-48 p-3"><a class="break-all text-emerald-400 hover:underline" href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${text}</a></td>`;
+        return `<td class="max-w-48 p-3 break-words ${index === 4 ? 'text-emerald-300' : 'text-slate-300'}">${text || '—'}</td>`;
+      }).join('');
+      preview.append(tr);
+    }
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      submitButton.disabled = true;
+      submitButton.textContent = 'Running…';
+      preview.replaceChildren();
+      log.replaceChildren();
+      empty.hidden = false;
+      downloadButton.hidden = true;
+      downloadUrl = '';
+      progress.style.width = '0%';
+      count.textContent = '0 / 0';
+
+      const data = {
+        query: document.querySelector('#query').value,
+        limit: Number(document.querySelector('#limit').value),
+        format: new FormData(form).get('format'),
+      };
+
+      try {
+        const response = await fetch('/api/scrape', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'Could not start scraping.');
+        const source = new EventSource(body.eventsUrl);
+        source.addEventListener('message', event => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'status') {
+            statusText.textContent = message.message;
+            addLog(message.message);
+          } else if (message.type === 'warning') {
+            addLog(message.message, true);
+          } else if (message.type === 'row') {
+            addRow(message.row);
+            total = message.total;
+            count.textContent = `${message.completed} / ${message.total}`;
+            progress.style.width = `${Math.round(message.completed / message.total * 100)}%`;
+          } else if (message.type === 'complete') {
+            statusText.textContent = `${message.message} ${message.count} leads ready.`;
+            downloadUrl = message.downloadUrl;
+            downloadButton.hidden = false;
+            submitButton.disabled = false;
+            submitButton.textContent = 'Start scraping';
+            addLog(message.message);
+            source.close();
+          } else if (message.type === 'error') {
+            statusText.textContent = message.message;
+            addLog(message.message, true);
+            submitButton.disabled = false;
+            submitButton.textContent = 'Start scraping';
+            source.close();
+          }
+        });
+        source.onerror = () => {
+          if (source.readyState === EventSource.CLOSED) return;
+          addLog('Connection to progress stream interrupted.', true);
+        };
+      } catch (error) {
+        statusText.textContent = error.message;
+        addLog(error.message, true);
+        submitButton.disabled = false;
+        submitButton.textContent = 'Start scraping';
+      }
+    });
+
+    downloadButton.addEventListener('click', () => {
+      if (downloadUrl) window.location.assign(downloadUrl);
+    });
+
+    document.querySelector('#clear-button').addEventListener('click', () => {
+      preview.replaceChildren();
+      empty.hidden = false;
+      count.textContent = '0 / 0';
+      progress.style.width = '0%';
+      statusText.textContent = 'Ready';
+    });
+  </script>
+</body>
+</html>

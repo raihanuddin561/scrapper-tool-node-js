@@ -1,0 +1,21 @@
+{
+  "name": "local-google-maps-lead-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Google Maps business lead scraper with email discovery and spreadsheet exports.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check scraper.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "cheerio": "^1.1.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0",
+    "playwright": "^1.55.0"
+  }
+}
