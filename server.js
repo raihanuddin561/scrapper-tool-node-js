@@ -101,15 +101,16 @@ async function generateWorkbook(rows) {
   sheet.columns = [
     { header: 'Name', key: 'Name', width: 32 },
     { header: 'Address', key: 'Address', width: 52 },
-    { header: 'Phone', key: 'Phone', width: 22 },
+    { header: 'Contact', key: 'Contact', width: 22 },
     { header: 'Website', key: 'Website', width: 38 },
+    { header: 'Plus Code', key: 'Plus Code', width: 34 },
     { header: 'Emails', key: 'Emails', width: 52 },
   ];
   sheet.getRow(1).font = { bold: true };
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8ECFF' } };
   sheet.getRow(1).alignment = { vertical: 'middle' };
   rows.forEach(row => sheet.addRow(row));
-  sheet.autoFilter = { from: 'A1', to: 'E1' };
+  sheet.autoFilter = { from: 'A1', to: 'F1' };
   return workbook;
 }
 

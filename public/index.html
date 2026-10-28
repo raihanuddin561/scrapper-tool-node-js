@@ -66,9 +66,9 @@
             <button id="clear-button" type="button" class="text-xs text-slate-500 hover:text-slate-300">Clear</button>
           </div>
           <div class="max-h-[530px] overflow-auto">
-            <table class="w-full min-w-[760px] border-collapse text-left text-xs">
+            <table class="w-full min-w-[1000px] border-collapse text-left text-xs">
               <thead class="sticky top-0 bg-slate-900 text-slate-400">
-                <tr><th class="p-3 font-medium">Name</th><th class="p-3 font-medium">Address</th><th class="p-3 font-medium">Phone</th><th class="p-3 font-medium">Website</th><th class="p-3 font-medium">Emails</th></tr>
+                <tr><th class="p-3 font-medium">Name</th><th class="p-3 font-medium">Address</th><th class="p-3 font-medium">Contact</th><th class="p-3 font-medium">Website</th><th class="p-3 font-medium">Plus Code</th><th class="p-3 font-medium">Emails</th></tr>
               </thead>
               <tbody id="preview"></tbody>
             </table>
@@ -114,10 +114,10 @@
       empty.hidden = true;
       const tr = document.createElement('tr');
       tr.className = 'border-t border-slate-800 align-top';
-      const values = [row.Name, row.Address, row.Phone, row.Website, row.Emails];
+      const values = [row.Name, row.Address, row.Contact, row.Website, row['Plus Code'], row.Emails];
       tr.innerHTML = values.map((value, index) => {
         const text = escapeHtml(value);
-        if (index === 3 && value) return `<td class="max-w-48 p-3"><a class="break-all text-emerald-400 hover:underline" href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${text}</a></td>`;
+        if (index === 3 && value && value !== 'N/A') return `<td class="max-w-48 p-3"><a class="break-all text-emerald-400 hover:underline" href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${text}</a></td>`;
         return `<td class="max-w-48 p-3 break-words ${index === 4 ? 'text-emerald-300' : 'text-slate-300'}">${text || '—'}</td>`;
       }).join('');
       preview.append(tr);

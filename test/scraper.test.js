@@ -2,7 +2,16 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { deduplicateListings, getListingKey } = require('../scraper');
+const {
+  cleanWebsite,
+  decodeCloudflareEmail,
+  deduplicateListings,
+  extractAddressFromRows,
+  extractEmailsFromHtml,
+  extractPhoneFromRows,
+  extractPlusCodeFromRows,
+  getListingKey,
+} = require('../scraper');
 
 test('deduplicates repeated Maps cards that use the same place URL', () => {
   const listings = [
@@ -39,4 +48,44 @@ test('uses name and address identity for cards with no stable URL identity', () 
   ];
 
   assert.deepEqual(deduplicateListings(listings), [listings[0]]);
+});
+
+test('extracts email addresses from mailto, Cloudflare, entities, and obfuscated text', () => {
+  const email = 'contact@keifcafe.com.au';
+  const key = 0x5c;
+  const encoded = [key, ...[...email].map(character => character.charCodeAt(0) ^ key)]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const html = `
+    <a href="mailto:hello@restaurant.com?subject=Hello">Email</a>
+    <span data-cfemail="${encoded}"></span>
+    <p>team[at]cafe[dot]com &#115;ales&#64;shop.org</p>
+    <p>image@assets.png junk@wixpress.com</p>`;
+
+  assert.equal(decodeCloudflareEmail(encoded), email);
+  assert.deepEqual(extractEmailsFromHtml(html), [
+    'contact@keifcafe.com.au',
+    'hello@restaurant.com',
+    'sales@shop.org',
+    'team@cafe.com',
+  ]);
+});
+
+test('extracts address, phone, and plus code while ignoring price and postcode digits', () => {
+  const rows = [
+    '$1–20 per person',
+    '12 High Street, Abbotsford VIC 3067',
+    '03 9417 1234',
+    '6VWR+6Q Aberfeldie, Victoria, Australia',
+  ];
+
+  const address = extractAddressFromRows(rows);
+  assert.equal(address, '12 High Street, Abbotsford VIC 3067');
+  assert.equal(extractPhoneFromRows(rows, address), '03 9417 1234');
+  assert.equal(extractPlusCodeFromRows(rows), '6VWR+6Q Aberfeldie, Victoria, Australia');
+});
+
+test('unwraps Google website redirects and ignores delivery providers', () => {
+  assert.equal(cleanWebsite('https://www.google.com/url?q=https%3A%2F%2Frestaurant.example.au%2Fcontact'), 'https://restaurant.example.au/contact');
+  assert.equal(cleanWebsite('https://www.ubereats.com/au/store/example'), '');
+  assert.equal(cleanWebsite('https://restaurant.example.au/'), 'https://restaurant.example.au');
 });
