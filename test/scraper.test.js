@@ -122,6 +122,15 @@ test('extracts address, phone, and plus code while ignoring price and postcode d
   assert.equal(extractPlusCodeFromRows(rows), '6VWR+6Q Aberfeldie, Victoria, Australia');
 });
 
+test('ignores Maps copy controls and extracts a code from Plus Code labels or nearby text', () => {
+  assert.equal(extractPlusCodeFromRows([
+    'Copy plus code',
+    'Plus code: 6VWR+6Q Aberfeldie, Victoria, Australia',
+  ]), '6VWR+6Q Aberfeldie, Victoria, Australia');
+  assert.equal(extractPlusCodeFromRows(['Copy plus code']), '');
+  assert.equal(extractPlusCodeFromRows(['Location details', '7XHX+2V']), '7XHX+2V');
+});
+
 test('extracts full labeled phone numbers and ignores short prices and postcodes', () => {
   assert.equal(extractPhoneFromRows([
     '$1–20 per person',

@@ -13,7 +13,7 @@ const DELIVERY_HOSTS = [
   'grubhub.com', 'opentable.com',
 ];
 const ADDRESS_PATTERN = /\d+\s+[A-Za-z0-9\s.,'-]+(?:St|Street|Rd|Road|Ave|Avenue|Blvd|Dr|Drive|Ln|Lane|Way|Hwy|Pde|Parade|Pl|Place|Ct|Court|VIC|NSW|QLD|WA|SA|TAS|ACT|NT|Australia)\b.*/i;
-const PLUS_CODE_PATTERN = /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b.*$/i;
+const PLUS_CODE_PATTERN = /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b(?:[ \t]+[^\r\n]*)?/i;
 
 function createLimit(concurrency) {
   const limit = Math.max(1, Math.min(5, Number(concurrency) || 4));
@@ -116,7 +116,7 @@ function extractPhoneFromRows(rows, address = '') {
 
 function extractPlusCodeFromRows(rows) {
   for (const row of rows || []) {
-    const match = String(row || '').match(PLUS_CODE_PATTERN);
+    const match = String(row || '').replace(/\s+/g, ' ').match(PLUS_CODE_PATTERN);
     if (match) return match[0].trim();
   }
   return '';
@@ -379,11 +379,22 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
           stripPrefix(firstLabel(['button[aria-label^="Phone:"]']), 'Phone') ||
           stripPrefix(firstLabel(['[aria-label^="Phone:"]']), 'Phone') ||
           '';
-        const plusCode = firstText(['[data-item-id="oloc"]']) ||
-          stripPrefix(firstLabel(['button[aria-label^="Plus code:"]']), 'Plus code') ||
-          stripPrefix(firstLabel(['[aria-label^="Plus code:"]']), 'Plus code') ||
-          rows.find(row => /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b.*$/i.test(row)) ||
-          '';
+        const plusCodeCandidates = [
+          ...[...document.querySelectorAll(
+            '[data-item-id="oloc"],[aria-label*="plus code" i],[title*="plus code" i],[data-value*="+" i]'
+          )].flatMap(node => [
+            clean(node.innerText || node.textContent),
+            clean(node.getAttribute('aria-label')),
+            clean(node.getAttribute('title')),
+            clean(node.getAttribute('data-value')),
+            clean(node.parentElement?.innerText),
+          ]),
+          ...clean(document.body.innerText).split(/\n+/).map(clean),
+          ...rows,
+        ].filter(Boolean);
+        const plusCode = plusCodeCandidates.find(value =>
+          /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b/i.test(value)
+        ) || '';
         const websiteNode = panel.querySelector('a[data-item-id="authority"],a[aria-label^="Website:"]') ||
           document.querySelector('a[data-item-id="authority"],a[aria-label^="Website:"]');
         return {
@@ -392,6 +403,7 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
           contact,
           contactCandidates,
           plusCode,
+          plusCodeCandidates,
           website: websiteNode?.getAttribute('href') || '',
           rows,
         };
@@ -403,8 +415,13 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
 
       const address = data.address || extractAddressFromRows(data.rows);
       const contact = extractPhoneFromRows([data.contact, ...data.contactCandidates, ...data.rows], address);
-      const plusCode = data.plusCode || extractPlusCodeFromRows(data.rows);
+      const plusCode = extractPlusCodeFromRows([
+        ...(data.plusCodeCandidates || []),
+        data.plusCode,
+        ...data.rows,
+      ]);
       if (!contact) onProgress({ type: 'warning', message: `No phone number was exposed in the Maps detail panel for ${data.name || expectedName || listing.text}.` });
+      if (!plusCode) onProgress({ type: 'warning', message: `No Plus Code was exposed in the Maps detail panel for ${data.name || expectedName || listing.text}.` });
 
       const row = {
         Name: data.name || listing.text || 'N/A',
