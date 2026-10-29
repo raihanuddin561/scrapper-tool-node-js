@@ -99,10 +99,12 @@ async function generateWorkbook(rows) {
   workbook.created = new Date();
   const sheet = workbook.addWorksheet('Leads', { views: [{ state: 'frozen', ySplit: 1 }] });
   sheet.columns = [
+    { header: 'Google Maps URL', key: 'googleSearchUrl', width: 60 },
     { header: 'Name', key: 'Name', width: 32 },
     { header: 'Address', key: 'Address', width: 52 },
     { header: 'Contact', key: 'Contact', width: 22 },
     { header: 'Website', key: 'Website', width: 38 },
+    { header: 'Domain', key: 'domain', width: 30 },
     { header: 'Plus Code', key: 'Plus Code', width: 34 },
     { header: 'Emails', key: 'Emails', width: 52 },
   ];
@@ -110,7 +112,7 @@ async function generateWorkbook(rows) {
   sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8ECFF' } };
   sheet.getRow(1).alignment = { vertical: 'middle' };
   rows.forEach(row => sheet.addRow(row));
-  sheet.autoFilter = { from: 'A1', to: 'F1' };
+  sheet.autoFilter = { from: 'A1', to: 'H1' };
   return workbook;
 }
 

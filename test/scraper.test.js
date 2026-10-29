@@ -4,12 +4,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   cleanWebsite,
+  crawlLeadEmails,
   decodeCloudflareEmail,
   deduplicateListings,
+  extractDomain,
   extractAddressFromRows,
   extractEmailsFromHtml,
   extractPhoneFromRows,
   extractPlusCodeFromRows,
+  getInternalPageUrls,
+  getSitemapLocations,
   getListingKey,
 } = require('../scraper');
 
@@ -70,6 +74,40 @@ test('extracts email addresses from mailto, Cloudflare, entities, and obfuscated
   ]);
 });
 
+test('decodes additional common email obfuscations and reads every email match', () => {
+  const html = `
+    <p>info (at) example (dot) org</p>
+    <p>hello at cafe dot com.au</p>
+    <a href="mailto:sales%40shop.org?subject=Sales">Sales</a>
+    <span data-email="events@cafe.com"></span>`;
+
+  assert.deepEqual(extractEmailsFromHtml(html), [
+    'events@cafe.com',
+    'hello@cafe.com.au',
+    'info@example.org',
+    'sales@shop.org',
+  ]);
+});
+
+test('discovers labeled internal pages and restricts sitemap links to the official origin', () => {
+  const links = getInternalPageUrls(`
+    <a href="/page-42" aria-label="Contact us">Contact</a>
+    <a href="/about/">About</a>
+    <a href="https://other.example/contact">External</a>
+    <a href="mailto:hello@example.org">Email</a>`,
+  'https://cafe.example/');
+  assert.deepEqual(links, [
+    { url: 'https://cafe.example/page-42', label: 'Contact Contact us' },
+    { url: 'https://cafe.example/about/', label: 'About' },
+  ]);
+  assert.deepEqual(getSitemapLocations(`
+    <urlset>
+      <url><loc>https://cafe.example/contact/</loc></url>
+      <url><loc>https://external.example/contact/</loc></url>
+    </urlset>`,
+  'https://cafe.example/sitemap.xml'), ['https://cafe.example/contact/']);
+});
+
 test('extracts address, phone, and plus code while ignoring price and postcode digits', () => {
   const rows = [
     '$1–20 per person',
@@ -84,8 +122,47 @@ test('extracts address, phone, and plus code while ignoring price and postcode d
   assert.equal(extractPlusCodeFromRows(rows), '6VWR+6Q Aberfeldie, Victoria, Australia');
 });
 
+test('extracts full labeled phone numbers and ignores short prices and postcodes', () => {
+  assert.equal(extractPhoneFromRows([
+    '$1–20 per person',
+    '12 High Street, Abbotsford VIC 3067',
+    'Phone: +61 (0) 3 9417 1234',
+  ], '12 High Street, Abbotsford VIC 3067'), '+61 (0) 3 9417 1234');
+  assert.equal(extractPhoneFromRows(['Phone: 0412 345 678']), '0412 345 678');
+});
+
 test('unwraps Google website redirects and ignores delivery providers', () => {
   assert.equal(cleanWebsite('https://www.google.com/url?q=https%3A%2F%2Frestaurant.example.au%2Fcontact'), 'https://restaurant.example.au/contact');
   assert.equal(cleanWebsite('https://www.ubereats.com/au/store/example'), '');
   assert.equal(cleanWebsite('https://restaurant.example.au/'), 'https://restaurant.example.au');
+});
+
+test('extracts the clean root hostname from an official website URL', () => {
+  const website = cleanWebsite('https://www.examplecafe.com.au/menu');
+  assert.equal(website, 'https://www.examplecafe.com.au/menu');
+  assert.equal(extractDomain(website), 'examplecafe.com.au');
+  assert.equal(extractDomain('N/A'), 'N/A');
+});
+
+test('preserves all output fields and skips email crawling without an official website', async () => {
+  const [row] = await crawlLeadEmails([{
+    Name: 'Cafe',
+    Address: 'N/A',
+    Contact: 'N/A',
+    Website: 'N/A',
+    domain: 'N/A',
+    'Plus Code': 'N/A',
+    googleSearchUrl: 'https://www.google.com/maps/place/Cafe/data=!abc',
+  }]);
+
+  assert.deepEqual(row, {
+    Name: 'Cafe',
+    Address: 'N/A',
+    Contact: 'N/A',
+    Website: 'N/A',
+    domain: 'N/A',
+    'Plus Code': 'N/A',
+    googleSearchUrl: 'https://www.google.com/maps/place/Cafe/data=!abc',
+    Emails: 'N/A',
+  });
 });
