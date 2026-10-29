@@ -57,7 +57,10 @@
           <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-800">
             <div id="progress" class="h-full w-0 rounded-full bg-emerald-500 transition-all duration-300"></div>
           </div>
-          <button id="download-button" type="button" hidden class="mt-4 w-full rounded-lg border border-emerald-500 px-4 py-2.5 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10">Download export</button>
+          <div class="mt-4 grid grid-cols-2 gap-3">
+            <button id="download-button" type="button" hidden class="rounded-lg border border-emerald-500 px-4 py-2.5 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10">Download export</button>
+            <button id="stop-button" type="button" hidden class="rounded-lg border border-red-500 px-4 py-2.5 text-sm font-bold text-red-400 hover:bg-red-500/10">Stop scraping</button>
+          </div>
         </div>
 
         <div class="mt-5 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
@@ -94,8 +97,11 @@
     const empty = document.querySelector('#empty');
     const log = document.querySelector('#log');
     const downloadButton = document.querySelector('#download-button');
+    const stopButton = document.querySelector('#stop-button');
     let total = 0;
     let downloadUrl = '';
+    let activeJobId = '';
+    let eventSource = null;
 
     function addLog(message, error = false) {
       const item = document.createElement('li');
@@ -136,7 +142,10 @@
       log.replaceChildren();
       empty.hidden = false;
       downloadButton.hidden = true;
+      stopButton.hidden = true;
       downloadUrl = '';
+      activeJobId = '';
+      if (eventSource) eventSource.close();
       progress.style.width = '0%';
       count.textContent = '0 / 0';
 
@@ -152,12 +161,20 @@
         });
         const body = await response.json();
         if (!response.ok) throw new Error(body.error || 'Could not start scraping.');
-        const source = new EventSource(body.eventsUrl);
-        source.addEventListener('message', event => {
+        activeJobId = body.id;
+        stopButton.hidden = false;
+        eventSource = new EventSource(body.eventsUrl);
+        eventSource.addEventListener('message', event => {
           const message = JSON.parse(event.data);
           if (message.type === 'status') {
             statusText.textContent = message.message;
             addLog(message.message);
+            if (message.downloadUrl) {
+              downloadUrl = message.downloadUrl;
+              downloadButton.textContent = message.downloadLabel || 'Download export';
+              downloadButton.hidden = false;
+              count.textContent = `${message.count || 0} / ${total || message.count || 0}`;
+            }
           } else if (message.type === 'warning') {
             addLog(message.message, true);
           } else if (message.type === 'row') {
@@ -168,21 +185,31 @@
           } else if (message.type === 'complete') {
             statusText.textContent = `${message.message} ${message.count} leads ready.`;
             downloadUrl = message.downloadUrl;
+            downloadButton.textContent = 'Download export';
             downloadButton.hidden = false;
+            stopButton.hidden = true;
             submitButton.disabled = false;
             submitButton.textContent = 'Start scraping';
             addLog(message.message);
-            source.close();
+            eventSource.close();
           } else if (message.type === 'error') {
             statusText.textContent = message.message;
             addLog(message.message, true);
+            stopButton.hidden = true;
             submitButton.disabled = false;
             submitButton.textContent = 'Start scraping';
-            source.close();
+            eventSource.close();
+          } else if (message.type === 'cancelled') {
+            statusText.textContent = message.message;
+            addLog(message.message);
+            stopButton.hidden = true;
+            submitButton.disabled = false;
+            submitButton.textContent = 'Start scraping';
+            eventSource.close();
           }
         });
-        source.onerror = () => {
-          if (source.readyState === EventSource.CLOSED) return;
+        eventSource.onerror = () => {
+          if (eventSource.readyState === EventSource.CLOSED) return;
           addLog('Connection to progress stream interrupted.', true);
         };
       } catch (error) {
@@ -190,6 +217,23 @@
         addLog(error.message, true);
         submitButton.disabled = false;
         submitButton.textContent = 'Start scraping';
+        stopButton.hidden = true;
+      }
+    });
+
+    stopButton.addEventListener('click', async () => {
+      if (!activeJobId) return;
+      stopButton.disabled = true;
+      stopButton.textContent = 'Stopping…';
+      try {
+        const response = await fetch(`/api/stop/${encodeURIComponent(activeJobId)}`, { method: 'POST' });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || 'Could not stop the job.');
+      } catch (error) {
+        addLog(error.message, true);
+      } finally {
+        stopButton.disabled = false;
+        stopButton.textContent = 'Stop scraping';
       }
     });
 

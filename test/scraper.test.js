@@ -15,6 +15,7 @@ const {
   getInternalPageUrls,
   getSitemapLocations,
   getListingKey,
+  isTimeoutError,
 } = require('../scraper');
 
 test('deduplicates repeated Maps cards that use the same place URL', () => {
@@ -174,4 +175,20 @@ test('preserves all output fields and skips email crawling without an official w
     googleSearchUrl: 'https://www.google.com/maps/place/Cafe/data=!abc',
     Emails: 'N/A',
   });
+});
+
+test('stops queued website email crawling when its abort signal is cancelled', async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    crawlLeadEmails([{ Name: 'Cafe', Website: 'N/A' }], () => {}, { signal: controller.signal }),
+    { name: 'AbortError', message: 'Scraping stopped by user.' }
+  );
+});
+
+test('identifies slow website requests so they do not get a redundant browser retry', () => {
+  assert.equal(isTimeoutError({ code: 'ECONNABORTED', message: 'timeout of 4000ms exceeded' }), true);
+  assert.equal(isTimeoutError({ code: 'ETIMEDOUT', message: 'socket timeout' }), true);
+  assert.equal(isTimeoutError({ code: 'ERR_BAD_RESPONSE', message: 'Request failed with status code 403' }), false);
 });

@@ -15,6 +15,19 @@ const DELIVERY_HOSTS = [
 const ADDRESS_PATTERN = /\d+\s+[A-Za-z0-9\s.,'-]+(?:St|Street|Rd|Road|Ave|Avenue|Blvd|Dr|Drive|Ln|Lane|Way|Hwy|Pde|Parade|Pl|Place|Ct|Court|VIC|NSW|QLD|WA|SA|TAS|ACT|NT|Australia)\b.*/i;
 const PLUS_CODE_PATTERN = /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b(?:[ \t]+[^\r\n]*)?/i;
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    const error = new Error('Scraping stopped by user.');
+    error.name = 'AbortError';
+    throw error;
+  }
+}
+
+function isTimeoutError(error) {
+  return error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT' ||
+    /timeout/i.test(error?.message || '');
+}
+
 function createLimit(concurrency) {
   const limit = Math.max(1, Math.min(5, Number(concurrency) || 4));
   let active = 0;
@@ -178,8 +191,9 @@ function deduplicateListings(listings) {
   });
 }
 
-async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
+async function scrapeGoogleMaps(query, limit, onProgress = () => {}, { signal } = {}) {
   const target = Math.max(1, Math.min(200, Number(limit) || 20));
+  throwIfAborted(signal);
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
@@ -189,8 +203,11 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
   });
   const page = await context.newPage();
   const listings = [];
+  const closeContext = () => { context.close().catch(() => {}); };
+  signal?.addEventListener('abort', closeContext, { once: true });
 
   try {
+    throwIfAborted(signal);
     onProgress({ type: 'status', message: 'Opening Google Maps...' });
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -202,6 +219,7 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
     let previousCount = 0;
     let stalled = 0;
     while (deduplicateListings(listings).length < target && stalled < 5) {
+      throwIfAborted(signal);
       const cards = (await feed.locator(':scope > div').evaluateAll(nodes =>
         nodes.map(node => {
           const anchor = node.querySelector('a.hfpxzc[href*="maps/place"],a[href*="maps/place"]');
@@ -243,6 +261,7 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
     const uniqueListings = deduplicateListings(listings).slice(0, target);
     for (let index = 0; index < uniqueListings.length; index += 1) {
       const listing = uniqueListings[index];
+      throwIfAborted(signal);
       const link = listing.link;
       const expectedNames = [];
       try {
@@ -258,32 +277,8 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
       ) || '';
       onProgress({ type: 'status', message: `Reading place ${index + 1}/${uniqueListings.length}...` });
       try {
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await dismissConsent(page);
-        const placeCards = page.locator('a.hfpxzc');
-        const resultsFeed = page.locator('[role="feed"]');
-        await resultsFeed.waitFor({ state: 'visible', timeout: 20000 });
-
-        let cardIndex = -1;
-        for (let attempt = 0; attempt < 8 && cardIndex < 0; attempt += 1) {
-          cardIndex = await placeCards.evaluateAll((anchors, href) =>
-            anchors.findIndex(anchor => anchor.href === href ||
-              new URL(anchor.getAttribute('href'), window.location.href).href === href), link);
-          if (cardIndex < 0) {
-            await resultsFeed.evaluate(feedNode => { feedNode.scrollTop = feedNode.scrollHeight; });
-            await page.waitForTimeout(500);
-          }
-        }
-
         const previousUrl = page.url();
-        if (cardIndex >= 0) {
-          await placeCards.nth(cardIndex).click({ timeout: 10000 });
-        } else {
-          onProgress({ type: 'warning', message: `Place card was not present in the feed; opening its saved Maps URL instead: ${expectedName || link}` });
-          await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        }
-
-        const waitForSelectedPlace = () => page.waitForFunction(({ names, oldUrl, fallbackUrl }) => {
+        const waitForSelectedPlace = (oldUrl, fallbackUrl, timeout = 10000) => page.waitForFunction(({ names, oldUrl: priorUrl, placeUrl }) => {
           const normalize = value => String(value || '').normalize('NFKD')
             .replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
           const headings = [...document.querySelectorAll('h1.DUwDvf, [role="main"] h1')]
@@ -294,24 +289,46 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
             heading === name || heading.startsWith(`${name} `) || name.startsWith(`${heading} `)
           ));
           const currentUrl = window.location.href;
-          const placeUrl = currentUrl.includes('/maps/place/') &&
+          const currentIsPlace = currentUrl.includes('/maps/place/') &&
             (/@-?\d+(?:\.\d+)?,-?\d/.test(currentUrl) || /[?&]data=|\/data=/.test(currentUrl));
-          return headingMatches && ((placeUrl && currentUrl !== oldUrl) || currentUrl === fallbackUrl);
-        }, { names: expectedNames, oldUrl: previousUrl, fallbackUrl: link }, { timeout: 15000 });
+          return headingMatches && currentIsPlace && (currentUrl !== priorUrl || currentUrl === placeUrl);
+        }, { names: expectedNames, oldUrl, placeUrl: fallbackUrl }, { timeout });
 
+        let directNavigationError;
         try {
-          await waitForSelectedPlace();
-        } catch (clickError) {
-          if (cardIndex < 0) throw clickError;
-          onProgress({ type: 'warning', message: `Place card did not open the expected detail panel; retrying its saved Maps URL: ${expectedName || link}` });
           await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await waitForSelectedPlace();
+          await waitForSelectedPlace(previousUrl, link);
+        } catch (error) {
+          throwIfAborted(signal);
+          directNavigationError = error;
+          await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await dismissConsent(page);
+          const placeCards = page.locator('a.hfpxzc');
+          const resultsFeed = page.locator('[role="feed"]');
+          await resultsFeed.waitFor({ state: 'visible', timeout: 20000 });
+          let cardIndex = -1;
+          for (let attempt = 0; attempt < 8 && cardIndex < 0; attempt += 1) {
+            throwIfAborted(signal);
+            cardIndex = await placeCards.evaluateAll((anchors, href) =>
+              anchors.findIndex(anchor => anchor.href === href ||
+                new URL(anchor.getAttribute('href'), window.location.href).href === href), link);
+            if (cardIndex < 0) {
+              await resultsFeed.evaluate(feedNode => { feedNode.scrollTop = feedNode.scrollHeight; });
+              await page.waitForTimeout(300);
+            }
+          }
+          if (cardIndex < 0) throw new Error(`Could not locate the saved place card. Direct URL also failed: ${directNavigationError.message}`);
+          const feedUrl = page.url();
+          await placeCards.nth(cardIndex).click({ timeout: 10000 });
+          await waitForSelectedPlace(feedUrl, link, 10000);
         }
       } catch (error) {
+        throwIfAborted(signal);
         onProgress({ type: 'warning', message: `Could not open a place: ${error.message}` });
         continue;
       }
 
+      throwIfAborted(signal);
       const currentUrl = page.url();
       const googleSearchUrl = currentUrl.includes('/maps/place/') ? currentUrl : link;
       const data = await page.evaluate(({ fallbackName, fallbackAriaLabel, expectedNames }) => {
@@ -440,6 +457,7 @@ async function scrapeGoogleMaps(query, limit, onProgress = () => {}) {
     }
     return result;
   } finally {
+    signal?.removeEventListener('abort', closeContext);
     await context.close();
     await browser.close();
   }
@@ -565,9 +583,10 @@ function isEmptySpaShell(html) {
     (!hasRenderedRoot || /^(loading|please enable javascript|javascript is required)$/i.test(bodyText));
 }
 
-async function fetchHtml(url) {
+async function fetchHtml(url, signal) {
   const response = await axios.get(url, {
-    timeout: 10000,
+    timeout: 4000,
+    signal,
     maxRedirects: 5,
     maxContentLength: 2 * 1024 * 1024,
     maxBodyLength: 2 * 1024 * 1024,
@@ -584,99 +603,129 @@ async function fetchHtml(url) {
   return { html, finalUrl: response.request?.res?.responseUrl || url, status: response.status };
 }
 
-async function fetchBrowserHtml(url) {
+async function fetchBrowserHtml(url, signal, timeout = 3500) {
   const browser = await chromium.launch({ headless: true });
+  const closeBrowser = () => { browser.close().catch(() => {}); };
+  signal?.addEventListener('abort', closeBrowser, { once: true });
   try {
     const page = await browser.newPage({ userAgent: USER_AGENT });
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     if (!response) throw new Error('No response received');
     if (response.status() === 404) return { html: '', finalUrl: page.url(), status: 404 };
     if (response.status() >= 400) throw new Error(`HTTP ${response.status()}`);
     return { html: await page.content(), finalUrl: page.url(), status: response.status() };
   } finally {
+    signal?.removeEventListener('abort', closeBrowser);
     await browser.close();
   }
 }
 
-async function fetchWebsitePage(url) {
+async function fetchWebsitePage(url, signal) {
+  throwIfAborted(signal);
   let axiosResult;
-  let axiosError;
   try {
-    axiosResult = await fetchHtml(url);
+    axiosResult = await fetchHtml(url, signal);
     if (axiosResult.status === 404 || axiosResult.status === 410) {
       return { ...axiosResult, notFound: true };
     }
     if (axiosResult.status < 400 && !isEmptySpaShell(axiosResult.html)) return axiosResult;
-    if (axiosResult.status >= 400) axiosError = new Error(`HTTP ${axiosResult.status}`);
   } catch (error) {
-    axiosError = error;
+    throwIfAborted(signal);
+    if (isTimeoutError(error)) {
+      throw new Error(`Axios timed out; skipped a second browser request to this unresponsive URL (${url})`);
+    }
+    try {
+      const browserResult = await fetchBrowserHtml(url, signal);
+      return browserResult.status === 404
+        ? { ...browserResult, notFound: true }
+        : browserResult;
+    } catch (browserError) {
+      throwIfAborted(signal);
+      throw new Error(`Axios failed (${error.message}); browser fallback failed (${browserError.message || String(browserError)})`);
+    }
+  }
+  if (axiosResult?.status >= 400 && axiosResult.status !== 403) {
+    throw new Error(`Website returned HTTP ${axiosResult.status}; browser retry skipped`);
   }
   try {
-    const browserResult = await fetchBrowserHtml(url);
-    return browserResult.status === 404
-      ? { ...browserResult, notFound: true }
-      : browserResult;
+    const browserResult = await fetchBrowserHtml(url, signal, axiosResult?.status === 403 ? 3000 : 3500);
+    if (browserResult.status >= 400) {
+      throw new Error(`HTTP ${browserResult.status}`);
+    }
+    return browserResult;
   } catch (browserError) {
+    throwIfAborted(signal);
     const reason = browserError.message || String(browserError);
-    if (axiosError) throw new Error(`Axios failed (${axiosError.message}); browser fallback failed (${reason})`);
-    throw new Error(`Axios returned an empty SPA shell; browser fallback failed (${reason})`);
+    const axiosReason = axiosResult?.status === 403
+      ? 'Axios was blocked with HTTP 403'
+      : 'Axios returned an empty SPA shell';
+    throw new Error(`${axiosReason}; browser fallback failed (${reason})`);
   }
 }
 
-async function crawlEmails(website) {
+async function crawlEmails(website, signal) {
+  throwIfAborted(signal);
   let publicUrl;
   try { publicUrl = await validatePublicUrl(website); }
   catch (error) { return { Emails: 'N/A', error: error.message }; }
 
   let homepage;
-  try { homepage = await fetchWebsitePage(publicUrl.href); }
+  try { homepage = await fetchWebsitePage(publicUrl.href, signal); }
   catch (error) {
+    throwIfAborted(signal);
     return { Emails: 'N/A', error: error.message };
   }
   if (homepage.notFound) return { Emails: 'N/A', error: `Official website returned HTTP 404: ${publicUrl.href}` };
 
   const foundEmails = new Set(extractEmailsFromHtml(homepage.html));
+  if (foundEmails.size) return { Emails: [...foundEmails].sort().join(', ') };
   const firstUrl = homepage.finalUrl;
   const origin = new URL(firstUrl).origin;
   const discovered = getInternalPageUrls(homepage.html, firstUrl);
   const sitemapUrls = new Set();
   const errors = [];
-  const sitemapCandidates = new Set();
-  try {
-    const robots = await fetchWebsitePage(new URL('/robots.txt', firstUrl).href);
-    if (!robots.notFound) {
-      for (const line of robots.html.split(/\r?\n/)) {
-        const match = line.match(/^\s*sitemap:\s*(\S+)/i);
-        if (match) sitemapCandidates.add(match[1]);
-      }
-    }
-  } catch (error) {
-    errors.push(`robots.txt: ${error.message}`);
-  }
-  for (const path of ['/sitemap.xml', '/sitemap_index.xml', '/wp-sitemap.xml']) {
-    sitemapCandidates.add(new URL(path, firstUrl).href);
-  }
-
-  let sitemapCount = 0;
-  for (const sitemapUrl of sitemapCandidates) {
-    if (sitemapCount >= 3) break;
-    let sitemap;
+  const discoveredContactPages = discovered.filter(item => rankContactPage(item.url, item.label) < 2);
+  if (!discoveredContactPages.length) {
+    const sitemapCandidates = new Set();
     try {
-      const url = new URL(sitemapUrl);
-      if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) continue;
-      sitemap = await fetchWebsitePage(url.href);
+      const robots = await fetchWebsitePage(new URL('/robots.txt', firstUrl).href, signal);
+      if (!robots.notFound) {
+        for (const line of robots.html.split(/\r?\n/)) {
+          const match = line.match(/^\s*sitemap:\s*(\S+)/i);
+          if (match) sitemapCandidates.add(match[1]);
+        }
+      }
     } catch (error) {
-      errors.push(`${sitemapUrl}: ${error.message}`);
-      continue;
+      throwIfAborted(signal);
+      errors.push(`robots.txt: ${error.message}`);
     }
-    if (sitemap.notFound || !sitemap.html || !/<(?:urlset|sitemapindex)\b/i.test(sitemap.html)) continue;
-    sitemapCount += 1;
-    const locations = getSitemapLocations(sitemap.html, sitemap.finalUrl);
-    for (const location of locations) {
-      if (/\.xml(?:$|[?#])/i.test(new URL(location).pathname)) {
-        if (sitemapCount < 3) sitemapCandidates.add(location);
-      } else {
-        sitemapUrls.add(location);
+    for (const path of ['/sitemap.xml', '/sitemap_index.xml', '/wp-sitemap.xml']) {
+      sitemapCandidates.add(new URL(path, firstUrl).href);
+    }
+
+    let sitemapCount = 0;
+    for (const sitemapUrl of sitemapCandidates) {
+      throwIfAborted(signal);
+      if (sitemapCount >= 2) break;
+      sitemapCount += 1;
+      let sitemap;
+      try {
+        const url = new URL(sitemapUrl);
+        if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)) continue;
+        sitemap = await fetchWebsitePage(url.href, signal);
+      } catch (error) {
+        throwIfAborted(signal);
+        errors.push(`${sitemapUrl}: ${error.message}`);
+        continue;
+      }
+      if (sitemap.notFound || !sitemap.html || !/<(?:urlset|sitemapindex)\b/i.test(sitemap.html)) continue;
+      const locations = getSitemapLocations(sitemap.html, sitemap.finalUrl);
+      for (const location of locations) {
+        if (/\.xml(?:$|[?#])/i.test(new URL(location).pathname)) {
+          if (sitemapCount < 2) sitemapCandidates.add(location);
+        } else {
+          sitemapUrls.add(location);
+        }
       }
     }
   }
@@ -690,12 +739,15 @@ async function crawlEmails(website) {
     .sort(([urlA, labelA], [urlB, labelB]) =>
       rankContactPage(urlA, labelA) - rankContactPage(urlB, labelB)
     );
-  for (const [subpage] of candidates.slice(0, 8)) {
+  for (const [subpage] of candidates.slice(0, discoveredContactPages.length ? 3 : 4)) {
+    throwIfAborted(signal);
     try {
-      const page = await fetchWebsitePage(subpage);
+      const page = await fetchWebsitePage(subpage, signal);
       if (page.notFound) continue;
       extractEmailsFromHtml(page.html).forEach(email => foundEmails.add(email));
+      if (foundEmails.size) break;
     } catch (error) {
+      throwIfAborted(signal);
       errors.push(`${subpage}: ${error.message}`);
     }
   }
@@ -705,16 +757,18 @@ async function crawlEmails(website) {
   };
 }
 
-async function crawlLeadEmails(listings, onProgress = () => {}) {
-  const limit = createLimit(4);
+async function crawlLeadEmails(listings, onProgress = () => {}, { signal } = {}) {
+  const limit = createLimit(6);
   let completed = 0;
   const tasks = listings.map((listing, index) => limit(async () => {
+    throwIfAborted(signal);
     onProgress({ type: 'status', message: `Crawling website ${index + 1}/${listings.length}: ${listing.Name || listing.Website || 'untitled'}` });
     let result = { Emails: 'N/A' };
     if (listing.Website && listing.Website !== 'N/A') {
       try {
-        result = await crawlEmails(listing.Website);
+        result = await crawlEmails(listing.Website, signal);
       } catch (error) {
+        throwIfAborted(signal);
         result = { Emails: 'N/A', error: error.message || String(error) };
       }
     }
@@ -738,6 +792,7 @@ async function crawlLeadEmails(listings, onProgress = () => {}) {
     return row;
   }));
   const wrappedRows = await Promise.all(tasks);
+  throwIfAborted(signal);
   return wrappedRows.map(result => result.status === 'fulfilled' ? result.value : { Emails: 'N/A' });
 }
 
@@ -745,6 +800,7 @@ module.exports = {
   scrapeGoogleMaps,
   crawlEmails,
   crawlLeadEmails,
+  isTimeoutError,
   cleanWebsite,
   extractDomain,
   deduplicateListings,

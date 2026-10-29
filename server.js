@@ -70,20 +70,42 @@ app.post('/api/scrape', (request, response) => {
   }
 
   const id = crypto.randomUUID();
-  jobs.set(id, { id, query, limit, format, status: 'running', rows: [], events: [] });
+  const controller = new AbortController();
+  jobs.set(id, { id, query, limit, format, status: 'running', rows: [], events: [], controller });
   response.status(202).json({ id, eventsUrl: `/api/events/${id}` });
 
   setImmediate(async () => {
     const job = jobs.get(id);
     try {
-      const places = await scrapeGoogleMaps(query, limit, event => publish(id, event));
-      publish(id, { type: 'status', message: `Found ${places.length} places. Starting website crawl...`, phase: 'crawl' });
-      job.rows = await crawlLeadEmails(places, event => publish(id, event));
+      const { signal } = controller;
+      const places = await scrapeGoogleMaps(query, limit, event => publish(id, event), { signal });
+      if (signal.aborted) throw new Error('Scraping stopped by user.');
+      job.rows = places.map(place => ({ ...place, Emails: 'N/A' }));
+      job.status = 'crawling';
+      publish(id, {
+        type: 'status',
+        message: `Found ${places.length} places. Email lookups are continuing; a current export is ready.`,
+        phase: 'crawl',
+        downloadUrl: places.length ? `/api/export/${id}` : undefined,
+        downloadLabel: 'Download current results',
+        count: places.length,
+      });
+      const crawledRows = await crawlLeadEmails(places, event => {
+        if (event.type === 'row') job.rows[event.index] = event.row;
+        publish(id, event);
+      }, { signal });
+      if (signal.aborted) throw new Error('Scraping stopped by user.');
+      job.rows = crawledRows;
       job.status = 'complete';
       publish(id, { type: 'complete', message: 'Scraping complete.', downloadUrl: `/api/export/${id}`, count: job.rows.length });
     } catch (error) {
-      job.status = 'failed';
-      publish(id, { type: 'error', message: error.message || 'Scraping failed.' });
+      if (controller.signal.aborted || error.name === 'AbortError') {
+        job.status = 'cancelled';
+        publish(id, { type: 'cancelled', message: 'Scraping stopped. You can download the results collected so far.' });
+      } else {
+        job.status = 'failed';
+        publish(id, { type: 'error', message: error.message || 'Scraping failed.' });
+      }
     } finally {
       setTimeout(() => {
         jobs.delete(id);
@@ -91,6 +113,18 @@ app.post('/api/scrape', (request, response) => {
       }, 30 * 60 * 1000);
     }
   });
+});
+
+app.post('/api/stop/:id', (request, response) => {
+  const job = jobs.get(request.params.id);
+  if (!job) return response.status(404).json({ error: 'Job not found or expired.' });
+  if (!['running', 'crawling'].includes(job.status)) {
+    return response.status(409).json({ error: 'This job is no longer running.' });
+  }
+  job.controller.abort();
+  job.status = 'cancelled';
+  publish(job.id, { type: 'cancelled', message: 'Stopping scrape and cancelling active requests...' });
+  return response.json({ message: 'Stop requested.' });
 });
 
 async function generateWorkbook(rows) {
@@ -119,7 +153,9 @@ async function generateWorkbook(rows) {
 app.get('/api/export/:id', async (request, response, next) => {
   const job = jobs.get(request.params.id);
   if (!job) return response.status(404).json({ error: 'Export is unavailable or expired.' });
-  if (job.status !== 'complete') return response.status(409).json({ error: 'The export is not ready.' });
+  if (!job.rows.length || job.status === 'running') {
+    return response.status(409).json({ error: 'Results are not ready to export yet.' });
+  }
 
   try {
     const workbook = await generateWorkbook(job.rows);
